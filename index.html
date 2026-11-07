@@ -3,17 +3,30 @@
 <head>
     <meta charset="UTF-8">
     <title>我的 AI 助手</title>
+    <!-- 引入 Markdown 解析库 -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- 引入代码高亮库及其样式 -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    
     <style>
-        body{ font-family: sans-serif; background-color: #f4f4f9; display: flex; justify-content: center; padding-top: 50px; }
-        .container { width: 500px; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
-        #chat-box { height: 400px; overflow-y: auto; border: 1px solid #ddd; padding: 10px; margin-bottom: 15px; border-radius: 5px; background: #fafafa; }
-        .message { margin-bottom: 10px; padding: 8px 12px; border-radius: 8px; max-width: 80%; word-wrap: break-word; }
+        body { font-family: sans-serif; background-color: #f4f4f9; display: flex; justify-content: center; padding-top: 50px; }
+        .container { width: 600px; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
+        #chat-box { height: 500px; overflow-y: auto; border: 1px solid #ddd; padding: 10px; margin-bottom: 15px; border-radius: 5px; background: #fafafa; }
+        .message { margin-bottom: 10px; padding: 8px 12px; border-radius: 8px; max-width: 85%; word-wrap: break-word; }
         .user-msg { background: #007bff; color: white; margin-left: auto; text-align: right; }
         .ai-msg { background: #e9ecef; color: black; margin-right: auto; }
         .input-area { display: flex; gap: 10px; }
         input { flex: 1; padding: 10px; border: 1px solid #ddd; border-radius: 5px; outline: none; }
         button { padding: 10px 20px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; }
         button:hover { background: #0056b3; }
+
+        /* ======= 新增的 Markdown 样式 ======= */
+        .ai-msg { white-space: normal; line-height: 1.6; }
+        .ai-msg p { margin-top: 0; margin-bottom: 10px; }
+        .ai-msg pre { background: #282c34; padding: 10px; border-radius: 5px; overflow-x: auto; }
+        .ai-msg code { font-family: Consolas, monospace; background: rgba(0,0,0,0.05); padding: 2px 4px; border-radius: 3px; color: #e83e8c; }
+        .ai-msg pre code { background: transparent; padding: 0; color: #abb2bf; }
     </style>
 </head>
 <body>
@@ -28,7 +41,7 @@
 </div>
 
 <script>
-        let chatHistory = [];
+    let chatHistory = [];
 
     async function sendMessage() {
         const inputElement = document.getElementById("user-input");
@@ -39,39 +52,39 @@
         inputElement.value = ""; 
         chatHistory.push({"role": "user", "content": message});
 
-        // 创建一个空的 AI 消息框，准备往里面填字
         const msgId = appendMessage("ai", "");
         const aiDiv = document.getElementById(msgId);
 
         try {
-            // 注意这里请求的路径变成了 /chat/stream
             const response = await fetch("/chat/stream", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ messages: chatHistory })
             });
 
-            // 获取读取流
             const reader = response.body.getReader();
             const decoder = new TextDecoder("utf-8");
             let fullReply = "";
 
-            // 循环读取数据块
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
                 
-                // 把二进制流解码成文字
                 const chunkText = decoder.decode(value, { stream: true });
                 fullReply += chunkText;
-                aiDiv.innerText = fullReply; // 实时更新到页面上
                 
-                // 自动滚到底部
+                // 【修改点】在这里用 marked 解析 Markdown 并渲染
+                aiDiv.innerHTML = marked.parse(fullReply);
+                
+                // 【修改点】对解析出来的代码块进行高亮处理
+                aiDiv.querySelectorAll('pre code').forEach((block) => {
+                    hljs.highlightElement(block);
+                });
+                
                 const chatBox = document.getElementById("chat-box");
                 chatBox.scrollTop = chatBox.scrollHeight;
             }
 
-            // 结束后，把完整的 AI 回复存入历史记录
             chatHistory.push({"role": "assistant", "content": fullReply});
 
         } catch (error) {
