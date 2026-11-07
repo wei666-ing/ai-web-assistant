@@ -1,5 +1,6 @@
 import os
 import requests
+import json
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -58,3 +59,37 @@ if __name__ == "__main__":
             print(f"AI:{ai_reply}")
             #5.极其重要：把AI的回答也存进列表，否则下一句它就忘了自己刚说了啥
             history_messages.append({"role": "assistant", "content": ai_reply})
+
+def ask_deepseek_stream(messages):
+    url = "https://api.deepseek.com/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    data = {
+        "model": "deepseek-chat",
+        "messages": messages,
+        "stream": True   # 关键：告诉大模型开启流式输出
+    }
+
+    # 关键：设置 stream=True，不让 requests 一次性下载全部数据
+    resp = requests.post(url, headers=headers, json=data, stream=True, timeout=30)
+
+    if resp.status_code ==200:
+        # 逐行读取服务器的响应
+        for line in resp.iter_lines():
+            if line:
+                decode_line = line.decode("utf-8")
+                if decode_line.startswith("data:"):
+                    json_str = decode_line[6:]
+                    if json_str == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(json_str)
+                        delta = chunk["choices"][0]["delta"]
+                        if "content" in delta:
+                            yield delta["content"]
+                    except Exception:
+                        pass
+    else:
+        yield "请求失败，请检查控制台。"

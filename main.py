@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from fastapi.responses import FileResponse 
-from ai_client import ask_deepseek
+from fastapi.responses import FileResponse, StreamingResponse
+from ai_client import ask_deepseek, ask_deepseek_stream
 
 app = FastAPI()
 
@@ -10,9 +10,11 @@ class ChatRequest(BaseModel):
 
 @app.post("/chat")
 def chat(request: ChatRequest):
-    #把前端传来的单句 message 包装成 AI 需要的格式
-    reply = ask_deepseek(request.messages)
-    return{"reply": reply}
+    return{"reply": ask_deepseek(request.messages)}
+
+@app.post("/chat/stream")
+def chat_stream(request: ChatRequest):
+    return StreamingResponse(ask_deepseek_stream(request.messages), media_type="text/event-stream")
 
 #新增：当用户访问根目录 （http://127/0.0.1：0000）时，返回index.html
 @app.get("/")
