@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>我的 AI 助手</title>
+    <style>
+        body{ font-family: sans-serif; background-color: #f4f4f9; display: flex; justify-content: center; padding-top: 50px; }
+        .container { width: 500px; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
+        #chat-box { height: 400px; overflow-y: auto; border: 1px solid #ddd; padding: 10px; margin-bottom: 15px; border-radius: 5px; background: #fafafa; }
+        .message { margin-bottom: 10px; padding: 8px 12px; border-radius: 8px; max-width: 80%; word-wrap: break-word; }
+        .user-msg { background: #007bff; color: white; margin-left: auto; text-align: right; }
+        .ai-msg { background: #e9ecef; color: black; margin-right: auto; }
+        .input-area { display: flex; gap: 10px; }
+        input { flex: 1; padding: 10px; border: 1px solid #ddd; border-radius: 5px; outline: none; }
+        button { padding: 10px 20px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>AI 聊天助手</h2>
+    <div id="chat-box"></div>
+    <div class="input-area">
+        <input type="text" id="user-input" placeholder="输入你的问题..." onkeypress="handleKeyPress(event)">
+        <button onclick="sendMessage()">发送</button>
+    </div>
+</div>
+
+<script>
+        // 新增：定义一个全局数组，用来存聊天记录
+    let chatHistory = [];
+
+    async function sendMessage() {
+        const inputElement = document.getElementById("user-input");
+        const chatBox = document.getElementById("chat-box");
+        const message = inputElement.value.trim();
+        
+        if (!message) return;
+
+        // 1. 把用户的话显示在页面上
+        appendMessage("user", message);
+        inputElement.value = ""; 
+
+        // 2. 把用户这句话存入历史记录数组
+        chatHistory.push({"role": "user", "content": message});
+
+        const loadingId = appendMessage("ai", "AI 思考中...");
+
+        try {
+            // 3. 发送请求，把整个 chatHistory 发给后端
+            const response = await fetch("/chat", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ messages: chatHistory }) // 注意这里变成了 messages
+            });
+            
+            const data = await response.json();
+            
+            // 4. 拿到回复，显示在页面上
+            document.getElementById(loadingId).innerText = data.reply;
+
+            // 5. 极其重要：把 AI 的回答也存入历史记录
+            chatHistory.push({"role": "assistant", "content": data.reply});
+
+        } catch (error) {
+            document.getElementById(loadingId).innerText = "请求失败，请检查后端是否运行。";
+        }
+    }
+
+    // 这个函数不用动，保留原来的
+    function appendMessage(role, text) {
+        const chatBox = document.getElementById("chat-box");
+        const msgDiv = document.createElement("div");
+        const msgId = "msg-" + Date.now(); 
+        msgDiv.id = msgId;
+        msgDiv.className = `message ${role}-msg`;
+        msgDiv.innerText = text;
+        chatBox.appendChild(msgDiv);
+        chatBox.scrollTop = chatBox.scrollHeight; 
+        return msgId;
+    }
+
+    function handleKeyPress(event) {
+        if (event.key === "Enter") {
+            sendMessage();
+        }
+    }
+</script>
+
+</body>
+</html>
