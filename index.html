@@ -52,6 +52,8 @@
         inputElement.value = ""; 
         chatHistory.push({"role": "user", "content": message});
 
+        fetch(`/save_message?role=user&content=${encodeURIComponent(message)}`, { method: 'POST' });
+
         const msgId = appendMessage("ai", "");
         const aiDiv = document.getElementById(msgId);
 
@@ -87,6 +89,8 @@
 
             chatHistory.push({"role": "assistant", "content": fullReply});
 
+            fetch(`/save_message?role=assistant&content=${encodeURIComponent(fullReply)}`, { method: 'POST' });
+
         } catch (error) {
             aiDiv.innerText = "请求失败。";
         }
@@ -109,7 +113,37 @@
             sendMessage();
         }
     }
-</script>
 
+    async function loadHistory() {
+        try {
+            const response = await fetch("/history");
+            const history = await response.json();
+            
+            // 把数据库里的数据渲染到网页上
+            history.forEach(msg => {
+                // 如果是 AI 的消息，需要用 marked 解析一下 Markdown
+                if (msg.role === "ai" || msg.role === "assistant") {
+                    const msgId = appendMessage("ai", "");
+                    const aiDiv = document.getElementById(msgId);
+                    aiDiv.innerHTML = marked.parse(msg.content);
+                    aiDiv.querySelectorAll('pre code').forEach((block) => {
+                        hljs.highlightElement(block);
+                    });
+                    // 顺便把历史记录塞进 chatHistory 数组，这样上下文记忆也能接上
+                    chatHistory.push({"role": "assistant", "content": msg.content});
+                } else {
+                    appendMessage("user", msg.content);
+                    chatHistory.push({"role": "user", "content": msg.content});
+                }
+            });
+            
+            const chatBox = document.getElementById("chat-box");
+            chatBox.scrollTop = chatBox.scrollHeight;
+        } catch (error) {
+            console.error("加载历史记录失败", error);
+        }
+    }
+    window.onload = loadHistory;
+</script>
 </body>
 </html>
