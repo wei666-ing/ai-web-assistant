@@ -34,6 +34,12 @@
 <div class="container">
     <h2>AI 聊天助手</h2>
     <div id="chat-box"></div>
+    <div style="margin-bottom: 10px; font-size: 14px; color:#555;">
+        <label>
+            <input type="checkbox" id="use-rag">
+            开启私有知识库问答 （RAG）
+        </label>
+    </div>
     <div class="input-area">
         <input type="text" id="user-input" placeholder="输入你的问题..." onkeypress="handleKeyPress(event)">
         <button onclick="sendMessage()">发送</button>
@@ -43,7 +49,7 @@
 <script>
     let chatHistory = [];
 
-    async function sendMessage() {
+       async function sendMessage() {
         const inputElement = document.getElementById("user-input");
         const message = inputElement.value.trim();
         if (!message) return;
@@ -52,44 +58,66 @@
         inputElement.value = ""; 
         chatHistory.push({"role": "user", "content": message});
 
+        // ====== 新增：把用户消息存入数据库 ======
         fetch(`/save_message?role=user&content=${encodeURIComponent(message)}`, { method: 'POST' });
 
         const msgId = appendMessage("ai", "");
         const aiDiv = document.getElementById(msgId);
 
+        const isRagMode = document.getElementById("use-rag").checked;
+
         try {
-            const response = await fetch("/chat/stream", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ messages: chatHistory })
-            });
-
-            const reader = response.body.getReader();
-            const decoder = new TextDecoder("utf-8");
-            let fullReply = "";
-
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
+            if (isRagMode) {
+                // ======== RAG 模式 ========
+                aiDiv.innerText = "正在检索知识库...";
+                const response = await fetch("/chat/rag", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ messages: chatHistory })
+                });
+                const data = await response.json();
                 
-                const chunkText = decoder.decode(value, { stream: true });
-                fullReply += chunkText;
-                
-                // 【修改点】在这里用 marked 解析 Markdown 并渲染
-                aiDiv.innerHTML = marked.parse(fullReply);
-                
-                // 【修改点】对解析出来的代码块进行高亮处理
+                aiDiv.innerHTML = marked.parse(data.reply);
                 aiDiv.querySelectorAll('pre code').forEach((block) => {
                     hljs.highlightElement(block);
                 });
+                chatHistory.push({"role": "assistant", "content": data.reply});
                 
-                const chatBox = document.getElementById("chat-box");
-                chatBox.scrollTop = chatBox.scrollHeight;
+                // ====== 新增：把 RAG 的 AI 回答存入数据库 ======
+                fetch(`/save_message?role=assistant&content=${encodeURIComponent(data.reply)}`, { method: 'POST' });
+
+            } else {
+                // ======== 正常流式模式 ========
+                const response = await fetch("/chat/stream", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ messages: chatHistory })
+                });
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder("utf-8");
+                let fullReply = "";
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    
+                    const chunkText = decoder.decode(value, { stream: true });
+                    fullReply += chunkText;
+                    
+                    aiDiv.innerHTML = marked.parse(fullReply);
+                    aiDiv.querySelectorAll('pre code').forEach((block) => {
+                        hljs.highlightElement(block);
+                    });
+                    
+                    const chatBox = document.getElementById("chat-box");
+                    chatBox.scrollTop = chatBox.scrollHeight;
+                }
+                chatHistory.push({"role": "assistant", "content": fullReply});
+
+                // ====== 新增：把流式的 AI 回答存入数据库 ======
+                fetch(`/save_message?role=assistant&content=${encodeURIComponent(fullReply)}`, { method: 'POST' });
             }
-
-            chatHistory.push({"role": "assistant", "content": fullReply});
-
-            fetch(`/save_message?role=assistant&content=${encodeURIComponent(fullReply)}`, { method: 'POST' });
 
         } catch (error) {
             aiDiv.innerText = "请求失败。";
