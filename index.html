@@ -3,12 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <title>我的 AI 助手</title>
-    <!-- 引入 Markdown 解析库 -->
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <!-- 引入代码高亮库及其样式 -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-    
+    <!-- Markdown 解析库改为本地文件，不再依赖外网 CDN -->
+    <script src="/static/marked.min.js"></script>
+
     <style>
         body { font-family: sans-serif; background-color: #f4f4f9; display: flex; justify-content: center; padding-top: 50px; }
         .container { width: 600px; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
@@ -16,17 +13,21 @@
         .message { margin-bottom: 10px; padding: 8px 12px; border-radius: 8px; max-width: 85%; word-wrap: break-word; }
         .user-msg { background: #007bff; color: white; margin-left: auto; text-align: right; }
         .ai-msg { background: #e9ecef; color: black; margin-right: auto; }
+        .error-msg { background: #ffe3e3; color: #b30000; margin-right: auto; font-size: 14px; }
         .input-area { display: flex; gap: 10px; }
         input { flex: 1; padding: 10px; border: 1px solid #ddd; border-radius: 5px; outline: none; }
         button { padding: 10px 20px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; }
         button:hover { background: #0056b3; }
 
-        /* ======= 新增的 Markdown 样式 ======= */
+        /* ======= Markdown 样式 ======= */
         .ai-msg { white-space: normal; line-height: 1.6; }
         .ai-msg p { margin-top: 0; margin-bottom: 10px; }
         .ai-msg pre { background: #282c34; padding: 10px; border-radius: 5px; overflow-x: auto; }
         .ai-msg code { font-family: Consolas, monospace; background: rgba(0,0,0,0.05); padding: 2px 4px; border-radius: 3px; color: #e83e8c; }
         .ai-msg pre code { background: transparent; padding: 0; color: #abb2bf; }
+        .ai-msg ul, .ai-msg ol { margin-top: 0; padding-left: 22px; }
+        .ai-msg table { border-collapse: collapse; margin-bottom: 10px; }
+        .ai-msg th, .ai-msg td { border: 1px solid #d0d0d0; padding: 4px 8px; font-size: 14px; }
     </style>
 </head>
 <body>
@@ -40,6 +41,12 @@
             开启私有知识库问答 （RAG）
         </label>
     </div>
+        <!-- 单独的文件上传区 -->
+    <div style="margin-bottom: 10px; display: flex; align-items: center;">
+        <input type="file" id="file-upload" accept=".pdf,.txt" style="font-size: 14px; color: #555;">
+    </div>
+
+    <!-- 聊天输入区 -->
     <div class="input-area">
         <input type="text" id="user-input" placeholder="输入你的问题..." onkeypress="handleKeyPress(event)">
         <button onclick="sendMessage()">发送</button>
@@ -48,51 +55,88 @@
 
 <script>
     let chatHistory = [];
+    let msgSeq = 0;
+    const MAX_HISTORY = 20;   // 发给后端时最多带最近 20 条，避免上下文越来越长
 
-       async function sendMessage() {
+    // 把文本安全地转成 HTML（防止模型输出里的 < > & 破坏页面）
+    function escapeHtml(text) {
+        return String(text)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;");
+    }
+
+    // 统一的 Markdown 渲染：有 marked 就用，没有就退化成纯文本，
+    // 保证任何情况下都不会因为渲染库缺失而整段变成“请求失败”
+    function renderMarkdown(text) {
+        text = text == null ? "" : String(text);
+        if (window.marked && typeof window.marked.parse === "function") {
+            try {
+                return window.marked.parse(text);
+            } catch (e) {
+                console.warn("Markdown 渲染失败，退化为纯文本：", e);
+            }
+        }
+        return "<p>" + escapeHtml(text).replace(/\n/g, "<br>") + "</p>";
+    }
+
+    // 统一的 POST + 错误检查：4xx/5xx 直接抛出，带状态码和响应体
+    async function postJSON(url, payload) {
+        const resp = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+        if (!resp.ok) {
+            let detail = "";
+            try { detail = (await resp.text()).slice(0, 200); } catch (e) {}
+            throw new Error("HTTP " + resp.status + (detail ? "：" + detail : ""));
+        }
+        return resp;
+    }
+
+    async function sendMessage() {
         const inputElement = document.getElementById("user-input");
         const message = inputElement.value.trim();
         if (!message) return;
 
         appendMessage("user", message);
-        inputElement.value = ""; 
-        chatHistory.push({"role": "user", "content": message});
+        inputElement.value = "";
+        chatHistory.push({ "role": "user", "content": message });
 
-        // ====== 新增：把用户消息存入数据库 ======
-        fetch(`/save_message?role=user&content=${encodeURIComponent(message)}`, { method: 'POST' });
+        // 把用户消息存入数据库
+        fetch(`/save_message?role=user&content=${encodeURIComponent(message)}`, { method: "POST" })
+            .catch(err => console.warn("保存用户消息失败：", err));
 
-        const msgId = appendMessage("ai", "");
-        const aiDiv = document.getElementById(msgId);
+        const aiDiv = setupMessage("ai", "");
 
         const isRagMode = document.getElementById("use-rag").checked;
+        const historyToSend = chatHistory.slice(-MAX_HISTORY);
 
         try {
             if (isRagMode) {
                 // ======== RAG 模式 ========
                 aiDiv.innerText = "正在检索知识库...";
-                const response = await fetch("/chat/rag", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ messages: chatHistory })
-                });
+                const response = await postJSON("/chat/rag", { messages: historyToSend });
                 const data = await response.json();
-                
-                aiDiv.innerHTML = marked.parse(data.reply);
-                aiDiv.querySelectorAll('pre code').forEach((block) => {
-                    hljs.highlightElement(block);
-                });
-                chatHistory.push({"role": "assistant", "content": data.reply});
-                
-                // ====== 新增：把 RAG 的 AI 回答存入数据库 ======
-                fetch(`/save_message?role=assistant&content=${encodeURIComponent(data.reply)}`, { method: 'POST' });
+
+                if (!data || data.reply == null) {
+                    throw new Error("后端没有返回 reply 字段");
+                }
+
+                aiDiv.innerHTML = renderMarkdown(data.reply);
+                chatHistory.push({ "role": "assistant", "content": data.reply });
+
+                fetch(`/save_message?role=assistant&content=${encodeURIComponent(data.reply)}`, { method: "POST" })
+                    .catch(err => console.warn("保存 AI 消息失败：", err));
 
             } else {
                 // ======== 正常流式模式 ========
-                const response = await fetch("/chat/stream", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ messages: chatHistory })
-                });
+                const response = await postJSON("/chat/stream", { messages: historyToSend });
+
+                if (!response.body) {
+                    throw new Error("当前浏览器不支持流式读取 response.body");
+                }
 
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder("utf-8");
@@ -101,39 +145,53 @@
                 while (true) {
                     const { done, value } = await reader.read();
                     if (done) break;
-                    
-                    const chunkText = decoder.decode(value, { stream: true });
-                    fullReply += chunkText;
-                    
-                    aiDiv.innerHTML = marked.parse(fullReply);
-                    aiDiv.querySelectorAll('pre code').forEach((block) => {
-                        hljs.highlightElement(block);
-                    });
-                    
+
+                    fullReply += decoder.decode(value, { stream: true });
+
+                    // 流式过程中如果只收到半个代码块，marked 也能勉强渲染，失败就走降级
+                    aiDiv.innerHTML = renderMarkdown(fullReply);
+
                     const chatBox = document.getElementById("chat-box");
                     chatBox.scrollTop = chatBox.scrollHeight;
                 }
-                chatHistory.push({"role": "assistant", "content": fullReply});
+                fullReply += decoder.decode();
 
-                // ====== 新增：把流式的 AI 回答存入数据库 ======
-                fetch(`/save_message?role=assistant&content=${encodeURIComponent(fullReply)}`, { method: 'POST' });
+                if (!fullReply.trim()) {
+                    throw new Error("后端返回了空内容（可能是模型接口报错，去看运行 uvicorn 的那个终端）");
+                }
+
+                aiDiv.innerHTML = renderMarkdown(fullReply);
+                chatHistory.push({ "role": "assistant", "content": fullReply });
+
+                fetch(`/save_message?role=assistant&content=${encodeURIComponent(fullReply)}`, { method: "POST" })
+                    .catch(err => console.warn("保存 AI 消息失败：", err));
             }
 
         } catch (error) {
-            aiDiv.innerText = "请求失败。";
+            console.error("发送消息失败：", error);
+            // 把真实原因显示出来，而不是笼统的“请求失败”
+            aiDiv.className = "message error-msg";
+            aiDiv.innerText = "请求失败：" + (error && error.message ? error.message : String(error));
+            const chatBox = document.getElementById("chat-box");
+            chatBox.scrollTop = chatBox.scrollHeight;
         }
     }
 
-    function appendMessage(role, text) {
+    // 生成一条消息气泡，返回它的 DOM 元素（用自增序号，避免同一毫秒内 id 重复）
+    function setupMessage(role, text) {
         const chatBox = document.getElementById("chat-box");
         const msgDiv = document.createElement("div");
-        const msgId = "msg-" + Date.now(); 
-        msgDiv.id = msgId;
+        msgSeq += 1;
+        msgDiv.id = "msg-" + msgSeq;
         msgDiv.className = `message ${role}-msg`;
         msgDiv.innerText = text;
         chatBox.appendChild(msgDiv);
-        chatBox.scrollTop = chatBox.scrollHeight; 
-        return msgId;
+        chatBox.scrollTop = chatBox.scrollHeight;
+        return msgDiv;
+    }
+
+    function appendMessage(role, text) {
+        return setupMessage(role, text).id;
     }
 
     function handleKeyPress(event) {
@@ -145,33 +203,65 @@
     async function loadHistory() {
         try {
             const response = await fetch("/history");
+            if (!response.ok) throw new Error("HTTP " + response.status);
             const history = await response.json();
-            
-            // 把数据库里的数据渲染到网页上
+
             history.forEach(msg => {
-                // 如果是 AI 的消息，需要用 marked 解析一下 Markdown
                 if (msg.role === "ai" || msg.role === "assistant") {
-                    const msgId = appendMessage("ai", "");
-                    const aiDiv = document.getElementById(msgId);
-                    aiDiv.innerHTML = marked.parse(msg.content);
-                    aiDiv.querySelectorAll('pre code').forEach((block) => {
-                        hljs.highlightElement(block);
-                    });
-                    // 顺便把历史记录塞进 chatHistory 数组，这样上下文记忆也能接上
-                    chatHistory.push({"role": "assistant", "content": msg.content});
+                    const aiDiv = setupMessage("ai", "");
+                    aiDiv.innerHTML = renderMarkdown(msg.content);
+                    chatHistory.push({ "role": "assistant", "content": msg.content });
                 } else {
-                    appendMessage("user", msg.content);
-                    chatHistory.push({"role": "user", "content": msg.content});
+                    setupMessage("user", msg.content);
+                    chatHistory.push({ "role": "user", "content": msg.content });
                 }
             });
-            
+
             const chatBox = document.getElementById("chat-box");
             chatBox.scrollTop = chatBox.scrollHeight;
         } catch (error) {
             console.error("加载历史记录失败", error);
         }
     }
-    window.onload = loadHistory;
+
+    document.getElementById("file-upload").addEventListener("change", async (event) => {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        const formData = new FormData();
+        formData.append("file", file);
+
+        setupMessage("ai", "📄 正在上传并解析文件，请稍候...");
+
+        try {
+            const response = await fetch("/upload", { method: "POST", body: formData });
+            if (!response.ok) throw new Error("HTTP " + response.status);
+
+            const result = await response.json();
+            if (result.success) {
+                setupMessage("ai", "📄 文件上传并解析成功！");
+            } else {
+                setupMessage("ai", "📄 文件上传失败：" + (result.error || "未知错误"));
+            }
+        } catch (error) {
+            console.error("文件上传出错", error);
+            setupMessage("ai", "📄 文件上传出错：" + error.message);
+        } finally {
+            event.target.value = "";   // 允许再次选择同一个文件
+        }
+    });
+
+    window.onload = function () {
+        // 直接双击打开 html 时，请求会发到 file:// 协议上，必然失败，这里先提示清楚
+        if (location.protocol === "file:") {
+            const tip = document.createElement("div");
+            tip.className = "message error-msg";
+            tip.innerText = "请通过 http://127.0.0.1:8000 打开本页面（先在项目目录运行 python -m uvicorn main:app --reload），不要直接双击 index.html。";
+            document.getElementById("chat-box").appendChild(tip);
+            return;
+        }
+        loadHistory();
+    };
 </script>
 </body>
 </html>
