@@ -1,5 +1,6 @@
 import io
 import os
+import re
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -122,13 +123,42 @@ init_db()
 
 
 # ================= 注册 / 登录 =================
+USERNAME_MIN, USERNAME_MAX = 3, 20
+PASSWORD_MIN, PASSWORD_MAX = 6, 32
+USERNAME_PATTERN = re.compile(r"[A-Za-z0-9_\u4e00-\u9fa5]+")
+
+
+def validate_user_input(user: UserAuth) -> str:
+    """注册信息校验，返回去掉首尾空格的用户名；不合法直接抛 400"""
+    username = user.username.strip()
+    password = user.password
+
+    if not username:
+        raise HTTPException(status_code=400, detail="用户名不能为空")
+    if not (USERNAME_MIN <= len(username) <= USERNAME_MAX):
+        raise HTTPException(status_code=400, detail=f"用户名长度需为 {USERNAME_MIN}-{USERNAME_MAX} 个字符")
+    if not USERNAME_PATTERN.fullmatch(username):
+        raise HTTPException(status_code=400, detail="用户名只能包含中文、字母、数字和下划线")
+    if not password:
+        raise HTTPException(status_code=400, detail="密码不能为空")
+    if not (PASSWORD_MIN <= len(password) <= PASSWORD_MAX):
+        raise HTTPException(status_code=400, detail=f"密码长度需为 {PASSWORD_MIN}-{PASSWORD_MAX} 个字符")
+    if not password.strip():
+        raise HTTPException(status_code=400, detail="密码不能全为空格")
+
+    return username
+
+
 @app.post("/register")
 def register(user: UserAuth):
+    # 0. 先校验格式，不合法直接 400
+    username = validate_user_input(user)
+
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
 
         # 1. 检查用户是否已存在
-        cursor.execute("SELECT id FROM users WHERE username = ?", (user.username,))
+        cursor.execute("SELECT id FROM users WHERE username = ?", (username,))
         existing = cursor.fetchone()
         if existing:
             raise HTTPException(status_code=400, detail="用户名已被注册")
@@ -137,19 +167,21 @@ def register(user: UserAuth):
         hashed_pwd = get_password_hash(user.password)
 
         # 3. 插入数据库
-        cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (user.username, hashed_pwd))
+        cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, hashed_pwd))
         conn.commit()
 
-        return {"message": "注册成功", "username": user.username}
+        return {"message": "注册成功", "username": username}
 
 
 @app.post("/login")
 def login(user: UserAuth):
+    username = user.username.strip()
+
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
 
         # 1. 根据用户名查用户
-        cursor.execute("SELECT id, password_hash FROM users WHERE username = ?", (user.username,))
+        cursor.execute("SELECT id, password_hash FROM users WHERE username = ?", (username,))
         row = cursor.fetchone()
 
         if not row:

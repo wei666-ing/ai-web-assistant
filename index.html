@@ -118,6 +118,20 @@
             return;
         }
 
+        // 前端先做一遍校验，省掉无意义的请求（登录不校验密码长度，避免误拦老账号）
+        if (username.length < 3 || username.length > 20) {
+            setAuthStatus("用户名长度需为 3-20 个字符", "err");
+            return;
+        }
+        if (!/^[A-Za-z0-9_\u4e00-\u9fa5]+$/.test(username)) {
+            setAuthStatus("用户名只能包含中文、字母、数字和下划线", "err");
+            return;
+        }
+        if (url === "/register" && (password.length < 6 || password.length > 32)) {
+            setAuthStatus("密码长度需为 6-32 个字符", "err");
+            return;
+        }
+
         try {
             const resp = await fetch(url, {
                 method: "POST",
@@ -127,7 +141,13 @@
 
             let data = {};
             try { data = await resp.json(); } catch (e) {}
-            if (!resp.ok) throw new Error(data.detail || ("HTTP " + resp.status));
+            if (!resp.ok) {
+                // FastAPI 的 422 校验错误里 detail 是数组，取第一条的 msg，避免显示成一串对象
+                const detail = Array.isArray(data.detail)
+                    ? (data.detail[0] && data.detail[0].msg) || "请求参数不合法"
+                    : data.detail;
+                throw new Error(detail || ("HTTP " + resp.status));
+            }
 
             if (url === "/register") {
                 setAuthStatus("注册成功，正在自动登录...", "ok");
