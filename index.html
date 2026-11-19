@@ -19,6 +19,16 @@
         button { padding: 10px 20px; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; }
         button:hover { background: #0056b3; }
 
+        /* ======= 登录 / 注册 ======= */
+        .auth-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; font-size: 14px; flex-wrap: wrap; }
+        .auth-bar input { flex: 0 0 110px; width: 110px; padding: 8px; font-size: 14px; }
+        .auth-bar button { padding: 8px 14px; font-size: 14px; }
+        .btn-gray { background: #6c757d; }
+        .btn-gray:hover { background: #5a6268; }
+        #auth-status { color: #666; font-size: 13px; margin-left: auto; }
+        #auth-status.ok { color: #198754; }
+        #auth-status.err { color: #b30000; }
+
         /* ======= Markdown 样式 ======= */
         .ai-msg { white-space: normal; line-height: 1.6; }
         .ai-msg p { margin-top: 0; margin-bottom: 10px; }
@@ -34,6 +44,17 @@
 
 <div class="container">
     <h2>AI 聊天助手</h2>
+
+    <!-- 登录 / 注册：登录成功把 Token 存进 localStorage -->
+    <div class="auth-bar">
+        <input type="text" id="auth-username" placeholder="用户名">
+        <input type="password" id="auth-password" placeholder="密码" onkeypress="handleAuthKeyPress(event)">
+        <button onclick="login()">登录</button>
+        <button class="btn-gray" onclick="register()">注册</button>
+        <button class="btn-gray" id="logout-btn" onclick="logout()" style="display:none;">退出</button>
+        <span id="auth-status">未登录（登录后才能聊天）</span>
+    </div>
+
     <div id="chat-box"></div>
     <div style="margin-bottom: 10px; font-size: 14px; color:#555;">
         <label>
@@ -57,6 +78,105 @@
     let chatHistory = [];
     let msgSeq = 0;
     const MAX_HISTORY = 20;   // 发给后端时最多带最近 20 条，避免上下文越来越长
+
+    // ================= 登录 / Token =================
+    function getToken() {
+        return localStorage.getItem("token");
+    }
+
+    // 所有请求统一走这里加 Authorization，避免哪个 fetch 漏写
+    function authHeaders(extra) {
+        const headers = Object.assign({}, extra || {});
+        const token = getToken();
+        if (token) headers["Authorization"] = "Bearer " + token;
+        return headers;
+    }
+
+    function setAuthStatus(text, type) {
+        const el = document.getElementById("auth-status");
+        el.innerText = text;
+        el.className = type || "";
+    }
+
+    function updateAuthUI() {
+        const username = localStorage.getItem("username");
+        const loggedIn = !!getToken();
+        document.getElementById("logout-btn").style.display = loggedIn ? "" : "none";
+        if (loggedIn) {
+            setAuthStatus("已登录：" + (username || "用户") + "（历史记录会保存到你的账号）", "ok");
+        } else {
+            setAuthStatus("未登录（登录后才能聊天和保存历史）", "");
+        }
+    }
+
+    async function handleAuth(url) {
+        const username = document.getElementById("auth-username").value.trim();
+        const password = document.getElementById("auth-password").value;
+
+        if (!username || !password) {
+            setAuthStatus("请先填写用户名和密码", "err");
+            return;
+        }
+
+        try {
+            const resp = await fetch(url, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ username, password })
+            });
+
+            let data = {};
+            try { data = await resp.json(); } catch (e) {}
+            if (!resp.ok) throw new Error(data.detail || ("HTTP " + resp.status));
+
+            if (url === "/register") {
+                setAuthStatus("注册成功，正在自动登录...", "ok");
+                await handleAuth("/login");
+                return;
+            }
+
+            // 登录成功，把 Token 存进浏览器
+            localStorage.setItem("token", data.access_token);
+            localStorage.setItem("username", username);
+            document.getElementById("auth-password").value = "";
+            updateAuthUI();
+
+            // 换账号后重新加载这个账号的历史记录
+            resetChat();
+            await loadHistory();
+        } catch (error) {
+            setAuthStatus((url === "/register" ? "注册失败：" : "登录失败：") + error.message, "err");
+        }
+    }
+
+    function login() { return handleAuth("/login"); }
+    function register() { return handleAuth("/register"); }
+
+    function logout() {
+        localStorage.removeItem("token");
+        localStorage.removeItem("username");
+        resetChat();
+        updateAuthUI();
+    }
+
+    function handleAuthKeyPress(event) {
+        if (event.key === "Enter") login();
+    }
+
+    function resetChat() {
+        document.getElementById("chat-box").innerHTML = "";
+        chatHistory = [];
+        msgSeq = 0;
+    }
+
+    // 保存消息到数据库（接口已上锁，未登录直接跳过）
+    function saveMessage(role, content) {
+        if (!getToken()) return;
+        fetch(`/save_message?role=${role}&content=${encodeURIComponent(content)}`, {
+            method: "POST",
+            headers: authHeaders()
+        }).catch(err => console.warn("保存消息失败：", err));
+    }
 
     // 把文本安全地转成 HTML（防止模型输出里的 < > & 破坏页面）
     function escapeHtml(text) {
@@ -84,7 +204,7 @@
     async function postJSON(url, payload) {
         const resp = await fetch(url, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: authHeaders({ "Content-Type": "application/json" }),
             body: JSON.stringify(payload)
         });
         if (!resp.ok) {
@@ -96,6 +216,13 @@
     }
 
     async function sendMessage() {
+        // 聊天接口已上锁，未登录就地提示，不用等 401
+        if (!getToken()) {
+            setAuthStatus("请先登录再聊天", "err");
+            document.getElementById("auth-username").focus();
+            return;
+        }
+
         const inputElement = document.getElementById("user-input");
         const message = inputElement.value.trim();
         if (!message) return;
@@ -105,8 +232,7 @@
         chatHistory.push({ "role": "user", "content": message });
 
         // 把用户消息存入数据库
-        fetch(`/save_message?role=user&content=${encodeURIComponent(message)}`, { method: "POST" })
-            .catch(err => console.warn("保存用户消息失败：", err));
+        saveMessage("user", message);
 
         const aiDiv = setupMessage("ai", "");
 
@@ -127,8 +253,7 @@
                 aiDiv.innerHTML = renderMarkdown(data.reply);
                 chatHistory.push({ "role": "assistant", "content": data.reply });
 
-                fetch(`/save_message?role=assistant&content=${encodeURIComponent(data.reply)}`, { method: "POST" })
-                    .catch(err => console.warn("保存 AI 消息失败：", err));
+                saveMessage("assistant", data.reply);
 
             } else {
                 // ======== 正常流式模式 ========
@@ -163,8 +288,7 @@
                 aiDiv.innerHTML = renderMarkdown(fullReply);
                 chatHistory.push({ "role": "assistant", "content": fullReply });
 
-                fetch(`/save_message?role=assistant&content=${encodeURIComponent(fullReply)}`, { method: "POST" })
-                    .catch(err => console.warn("保存 AI 消息失败：", err));
+                saveMessage("assistant", fullReply);
             }
 
         } catch (error) {
@@ -201,8 +325,22 @@
     }
 
     async function loadHistory() {
+        // 没登录就不请求，避免控制台一片 401
+        if (!getToken()) {
+            updateAuthUI();
+            return;
+        }
         try {
-            const response = await fetch("/history");
+            const response = await fetch("/history", { headers: authHeaders() });
+
+            // Token 过期 / 无效
+            if (response.status === 401) {
+                localStorage.removeItem("token");
+                localStorage.removeItem("username");
+                updateAuthUI();
+                setAuthStatus("登录已过期，请重新登录", "err");
+                return;
+            }
             if (!response.ok) throw new Error("HTTP " + response.status);
             const history = await response.json();
 
@@ -228,13 +366,22 @@
         const file = event.target.files[0];
         if (!file) return;
 
+        // 上传接口也已上锁
+        if (!getToken()) {
+            setupMessage("ai", "📄 请先登录再上传文件");
+            setAuthStatus("请先登录再上传文件", "err");
+            event.target.value = "";
+            return;
+        }
+
         const formData = new FormData();
         formData.append("file", file);
 
         setupMessage("ai", "📄 正在上传并解析文件，请稍候...");
 
         try {
-            const response = await fetch("/upload", { method: "POST", body: formData });
+            // 上传走 FormData，不要手写 Content-Type，但 Authorization 必须带上
+            const response = await fetch("/upload", { method: "POST", headers: authHeaders(), body: formData });
             if (!response.ok) throw new Error("HTTP " + response.status);
 
             const result = await response.json();
@@ -260,6 +407,7 @@
             document.getElementById("chat-box").appendChild(tip);
             return;
         }
+        updateAuthUI();
         loadHistory();
     };
 </script>
