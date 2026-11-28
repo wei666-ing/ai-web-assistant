@@ -1,13 +1,16 @@
 # 🚀 基于 DeepSeek 的 Web 端 AI 聊天助手
 
-这是一个基于 Python 全栈开发的 AI 聊天应用。前端使用原生 HTML/CSS/JavaScript 构建，后端采用 FastAPI 框架，成功接入 DeepSeek 大语言模型 API。项目实现了**带上下文记忆的多轮对话**，并支持**基于 SSE 的流式输出（打字机效果）**与**Markdown 实时渲染**。
+这是一个基于 Python 全栈开发的 AI 聊天应用。前端使用原生 HTML/CSS/JavaScript 构建，后端采用 FastAPI 框架，接入 DeepSeek 大语言模型 API，并用 ChromaDB 做本地知识库检索（RAG）。项目实现了**带上下文记忆的多轮对话**、**基于 SSE 的流式输出（打字机效果）**、**Markdown 实时渲染**，以及 **JWT 用户鉴权 + 数据按用户隔离**。
 
 ## 🛠️ 技术栈
 - **前端**：HTML5, CSS3, 原生 JavaScript (Fetch API, ReadableStream)
-- **后端**：Python 3, FastAPI, Uvicorn
+- **后端**：Python 3.11, FastAPI, Uvicorn
+- **数据层**：SQLAlchemy 2.0（ORM 声明式模型）+ SQLite
 - **鉴权**：JWT（PyJWT）+ bcrypt 密码哈希
-- **大模型**：DeepSeek API (兼容 OpenAI 格式)
-- **第三方库**：marked.js (Markdown 解析，已改为本地引入，见下方“常见问题”)
+- **大模型**：DeepSeek API（兼容 OpenAI 格式）、阿里云百炼 Embedding
+- **RAG**：ChromaDB 向量库 + pypdf 文档解析
+- **部署**：Docker
+- **第三方库**：marked.js（Markdown 解析，已改为本地引入，见下方“常见问题”）
 - **环境管理**：python-dotenv
 
 ## ✨ 核心功能与亮点
@@ -16,9 +19,26 @@
 3. **富文本渲染**：使用本地引入的 `marked.js`，将大模型输出的 Markdown 格式实时渲染为标题、列表、表格和代码块。
 4. **安全防护**：使用 `.env` 文件隔离 API Key，通过 `.gitignore` 防止敏感信息泄露。
 5. **用户鉴权与多租户隔离**：注册 / 登录后签发 JWT，前端存于 `localStorage` 并在每次请求带上 `Authorization: Bearer <token>`；聊天、知识库上传、历史读写接口全部由 `get_current_user` 守卫，未登录返回 401，聊天记录按 `user_id` 隔离。
+6. **RAG 知识库问答**：支持上传 PDF/TXT，后端解析、切分、向量化后写入 ChromaDB；提问时先检索相关片段再交给大模型回答，前端可切换「普通对话 / 知识库问答」双引擎。
+7. **数据层 ORM 化**：用 SQLAlchemy 2.0 声明式模型统一表结构，`Base.metadata.create_all()` 自动建表，替换手写 SQL，天然防注入、便于后续演进。
 
 ## 📸 项目演示
-*(把你刚才发我的那张带代码高亮的截图，直接拖拽到这里，GitHub 会自动生成图片链接)*
+*(把截图直接拖拽到这里，GitHub 会自动生成图片链接)*
+
+## 🐳 容器化部署（推荐）
+
+```bash
+docker build -t my-ai-app .
+docker run -d -p 8001:8000 --name ai-container --env-file .env my-ai-app
+docker logs ai-container
+```
+
+几个要点：
+- `--env-file .env` 必须带，否则容器里读不到 `DEEPSEEK_API_KEY` / `JWT_SECRET_KEY`
+- 冒号右边固定 `8000`（容器内端口），左边可改成你本机任意空闲端口
+- 镜像**不含** `chat_history.db` 和 `chroma_db/`（见 `.dockerignore`），首次启动由 `create_all` 自动建表，容器内是全新空库——所以要用新账号注册
+- 依赖清单统一由 `requirements.txt` 管理，Dockerfile 里只写 `pip install -r requirements.txt`
+- Dockerfile 的层顺序为「先拷 requirements → 装依赖 → 再拷代码」，改代码时不会触发重新下载依赖
 
 ## ⚙️ 本地运行指南
 1. 克隆本项目：
@@ -26,9 +46,9 @@
    git clone https://github.com/wei666-ing/ai-web-assistant.git
    cd ai-web-assistant
    ```
-2. 安装依赖：
+2. 安装依赖（统一走依赖清单，不要手打一长串包名）：
    ```bash
-   python -m pip install fastapi uvicorn requests python-dotenv pypdf chromadb pyjwt bcrypt python-multipart
+   python -m pip install -r requirements.txt
    ```
 3. 在项目根目录新建 `.env`，填入自己的 Key 和 JWT 密钥：
    ```
@@ -53,7 +73,9 @@
 | 接口 | 方法 | 是否需要 Token |
 |---|---|---|
 | `/register` `/login` | POST | 否 |
-| `/chat/stream` `/chat/rag` `/upload` `/history` `/save_message` | POST / GET | **是** |
+| `/chat/stream` `/chat/rag` `/upload` `/save_message` | POST | **是** |
+| `/history` | GET | **是** |
+| `/` | GET | 否 |
 | `/docs` | GET | 否（在线接口文档，可点 Authorize 填 Token 调试） |
 
 > 注册规则：用户名 **3-20** 个字符（中文 / 字母 / 数字 / 下划线），密码 **6-32** 个字符；前后空格会自动去掉。
@@ -70,6 +92,11 @@
 - **“marked is not defined”**：原先 index.html 从 jsdelivr / bootcdn 加载 marked 和 highlight.js，这两个 CDN 在国内经常连接被重置或 404，库没加载进来，`marked.parse()` 抛错后被 `catch` 统一显示成“请求失败”。
 
   修复方式：把 marked 下载下来放到 `static/marked.min.js`，由 FastAPI 的 `StaticFiles` 挂载到 `/static` 对外提供，页面改为 `<script src="/static/marked.min.js">`，彻底不依赖外网；同时在代码里加了降级逻辑，渲染库缺失时退化为纯文本，不会再整段变成“请求失败”。当前错误提示也会带上真实原因（如 `请求失败：HTTP 500`），方便定位。
+
+### `/docs` 页面一片空白
+FastAPI 的 Swagger UI 默认从 jsdelivr CDN 加载 JS/CSS，国内网络经常加载失败，于是只剩白底。可以先访问 `http://127.0.0.1:8000/openapi.json` 确认接口是否正常——能返回 JSON 说明后端没问题，只是文档 UI 的资源没下下来。
+
+替代方案：用 `check_api.py` 这类脚本直接调接口验收，或把 swagger-ui 的 js/css 下载到 `static/` 下、用 `get_swagger_ui_html` 自定义 `/docs` 路由指向本地文件。
 
 ### 换了电脑 / 换了终端后 `ModuleNotFoundError: No module named 'fastapi'`
 说明当前 `python` 不是装过依赖的那个解释器。用 `python --version` 和 `python -m pip list` 确认，必要时指定完整路径，例如 `C:\Users\wei\AppData\Local\Programs\Python\Python311\python.exe -m uvicorn main:app --reload`。
