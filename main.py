@@ -1,10 +1,11 @@
 import io
 import os
 import re
-import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from sqlalchemy import create_engine, Column, Integer, String, Text, ForeignKey
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column,Session,sessionmaker
 
 import bcrypt
 import chromadb
@@ -84,41 +85,43 @@ class UserAuth(BaseModel):
 class ChatRequest(BaseModel):
     messages: list
 
+class Base(DeclarativeBase):
+    pass
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+
+class Message(Base):
+    __tablename__ = "messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"))
+    role: Mapped[str] = mapped_column(String(20))
+    content: Mapped[str] = mapped_column(Text)
+
+engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
+
+SessionLocal = sessionmaker(autoflush=False, bind=engine)
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 app = FastAPI()
-
 # 把 static 目录挂到 /static，前端就能用本地文件，不再依赖外网 CDN
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
 
 
 # ================= 数据库（历史记录）相关 =================
 def init_db():
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        # 一次只能执行一条语句，建表用 executescript
-        cursor.executescript('''
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                role TEXT,
-                content TEXT,
-                FOREIGN KEY (user_id) REFERENCES users(id)
-            );
-        ''')
-
-        # 老库里 messages 没有 user_id 字段，自动补上
-        columns = [row[1] for row in cursor.execute("PRAGMA table_info(messages)").fetchall()]
-        if "user_id" not in columns:
-            cursor.execute("ALTER TABLE messages ADD COLUMN user_id INTEGER")
-
-        conn.commit()
-
-
+    Base.metadata.create_all(bind=engine)
 init_db()
 
 
@@ -148,77 +151,59 @@ def validate_user_input(user: UserAuth) -> str:
 
     return username
 
-
 @app.post("/register")
-def register(user: UserAuth):
-    # 0. 先校验格式，不合法直接 400
+def register(user: UserAuth, db: Session = Depends(get_db)):
+    # ① 校验格式
     username = validate_user_input(user)
 
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
+    # ② 查重：去 users 表找有没有同名账号
+    existing = db.query(User).filter(User.username == username).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="用户名已被注册")
 
-        # 1. 检查用户是否已存在
-        cursor.execute("SELECT id FROM users WHERE username = ?", (username,))
-        existing = cursor.fetchone()
-        if existing:
-            raise HTTPException(status_code=400, detail="用户名已被注册")
+    # ③ 建对象（这时它还只在内存里，数据库里没有）
+    new_user = User(
+        username=username,
+        password_hash=get_password_hash(user.password),
+    )
 
-        # 2. 加密密码
-        hashed_pwd = get_password_hash(user.password)
+    # ④ 写库：add 只是排队，commit 才真正执行 INSERT
+    db.add(new_user)
+    db.commit()
 
-        # 3. 插入数据库
-        cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, hashed_pwd))
-        conn.commit()
-
-        return {"message": "注册成功", "username": username}
-
+    return {"message": "注册成功", "username": username}
 
 @app.post("/login")
-def login(user: UserAuth):
+def login(user: UserAuth, db: Session = Depends(get_db)):
     username = user.username.strip()
 
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
+    # ① 查账号
+    user_row = db.query(User).filter(User.username == username).first()
+    if not user_row:
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
 
-        # 1. 根据用户名查用户
-        cursor.execute("SELECT id, password_hash FROM users WHERE username = ?", (username,))
-        row = cursor.fetchone()
+    # ② 验密码（用数据库里存的哈希对比）
+    if not verify_password(user.password, user_row.password_hash):
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
 
-        if not row:
-            raise HTTPException(status_code=401, detail="用户名或密码错误")
+    # ③ 签发 token，sub 必须是字符串
+    access_token = create_access_token(data={"sub": str(user_row.id)})
 
-        user_id, hashed_pwd = row
-
-        # 2. 验证密码
-        if not verify_password(user.password, hashed_pwd):
-            raise HTTPException(status_code=401, detail="用户名或密码错误")
-
-        # 3. 生成 Token（把 user_id 塞进去，方便以后用）
-        access_token = create_access_token(data={"sub": str(user_id)})
-
-        return {"access_token": access_token, "token_type": "bearer"}
-
+    return {"access_token": access_token, "token_type": "bearer"}
 
 @app.get("/history")
-def get_history(user_id: int = Depends(get_current_user)):
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        # 只查当前用户的记录
-        cursor.execute("SELECT role, content FROM messages WHERE user_id = ?", (user_id,))
-        rows = cursor.fetchall()
-        return [{"role": row[0], "content": row[1]} for row in rows]
+def get_history(user_id: int = Depends(get_current_user), db: Session = Depends(get_db)):
+    # 查：只拿当前用户的消息
+    rows = db.query(Message).filter(Message.user_id == user_id).all()
 
+    # 转：保持前端要的结构 [{role, content}]
+    return [{"role": m.role, "content": m.content} for m in rows]
 
 @app.post("/save_message")
-def save_message(role: str, content: str, user_id: int = Depends(get_current_user)):
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        # 插入时带上 user_id
-        cursor.execute(
-            "INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)",
-            (user_id, role, content)
-        )
-        conn.commit()
+def save_message(role: str, content: str, user_id: int = Depends(get_current_user), db: Session = Depends(get_db)):
+    message = Message(user_id=user_id, role=role, content=content)
+    db.add(message)
+    db.commit()
     return {"status": "ok"}
 
 
@@ -318,3 +303,16 @@ async def upload_file(user_id: int = Depends(get_current_user), file: UploadFile
     except Exception as e:
         print("解析文件出错:", e)
         return {"success": False, "error": str(e)}
+
+
+# ================= 直接运行入口 =================
+# 不加这一段，在 PyCharm / VS Code 里点“运行 main.py”只会加载一遍代码就静默退出，
+# 看起来就是“运行不了”。加上以后 `python main.py` 也能直接把服务起起来。
+if __name__ == "__main__":
+    import uvicorn
+
+    HOST = os.getenv("HOST", "127.0.0.1")
+    PORT = int(os.getenv("PORT", "8000"))
+
+    print(f"服务已启动：http://{HOST}:{PORT}  （按 Ctrl+C 停止）")
+    uvicorn.run("main:app", host=HOST, port=PORT)
